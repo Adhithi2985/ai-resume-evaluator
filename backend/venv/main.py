@@ -2,11 +2,11 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
-from pydantic import BaseModel
+import difflib
 
 app = FastAPI()
 
-# Allow frontend access (CORS)
+# CORS settings
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,31 +15,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def extract_text(file: UploadFile):
+    reader = PdfReader(file.file)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
 @app.post("/upload/")
-async def upload_resume(file: UploadFile = File(...), mode: str = Form(...)):
+async def upload_resume(
+    resume: UploadFile = File(...),
+    mode: str = Form(...),
+    jd: UploadFile = File(None)
+):
     try:
-        # Read file contents
-        reader = PdfReader(file.file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
+        resume_text = extract_text(resume)
 
-        # Dummy resume scoring logic
-        score = 0
-        if "Python" in text: score += 2
-        if "React" in text: score += 2
-        if "Machine Learning" in text: score += 3
-        if "Intern" in text: score += 1
-        if "Project" in text: score += 2
+        # Basic keyword-based scoring
+        keywords = ["Python", "React", "Machine Learning", "SQL", "API", "Intern"]
+        score = sum(1 for kw in keywords if kw.lower() in resume_text.lower())
 
-        return { "text": text, "score": score }
+        # If HR uploads a JD, calculate similarity
+        if mode == "HR" and jd:
+            jd_text = extract_text(jd)
+            matcher = difflib.SequenceMatcher(None, jd_text.lower(), resume_text.lower())
+            similarity = round(matcher.ratio() * 100, 2)
+            return { "text": resume_text, "score": score, "similarity": similarity }
+
+        return { "text": resume_text, "score": score }
 
     except Exception as e:
         return { "error": str(e) }
 
 @app.get("/")
 async def root():
-    return { "message": "Resume Evaluator API running!" }
+    return { "message": "AI Resume Evaluator API is live!" }
+
 
 
 
