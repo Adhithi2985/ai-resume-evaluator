@@ -1,18 +1,12 @@
-# main.py — FastAPI Backend with Resume Scoring and OpenAI Suggestions
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from PyPDF2 import PdfReader
-import io
+from pydantic import BaseModel
+import fitz  # PyMuPDF
 import re
-import openai
-import os
-from dotenv import load_dotenv
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 app = FastAPI()
 
-# Allow frontend access (CORS)
+# Allow CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,85 +15,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Extract text from PDF
-
-def extract_text_from_pdf(file_bytes):
-    pdf_reader = PdfReader(io.BytesIO(file_bytes))
-    text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text() or ""
-    return text.strip()
-
-# Basic resume scoring function
-def score_resume(text):
-    keywords = ["Python", "JavaScript", "React", "Django", "SQL", "AWS", "Node.js", "Machine Learning"]
-    score = sum(1 for kw in keywords if re.search(rf"\\b{kw}\\b", text, re.IGNORECASE))
-    return min(score, 10)
-
-# Similarity score
-def calculate_similarity(resume_text, jd_text):
-    vectorizer = TfidfVectorizer()
-    vectors = vectorizer.fit_transform([resume_text, jd_text])
-    similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
-    return round(similarity * 100, 2)
-
-# Generate suggestions using OpenAI
-def generate_openai_suggestions(resume_text):
+# Extract text from uploaded PDF
+async def extract_text_from_pdf(file: UploadFile) -> str:
     try:
-        prompt = (
-            "You are a resume evaluator AI. Analyze the following resume text and provide suggestions "
-            "to improve formatting, keywords, and relevance for technical job applications.\n\n"
-            f"Resume Text:\n{resume_text}\n\nSuggestions:"
-        )
-
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful resume assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=300,
-        )
-
-        return response.choices[0].message.content.strip()
-
+        contents = await file.read()
+        doc = fitz.open(stream=contents, filetype="pdf")
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        return text
     except Exception as e:
-        print("OpenAI Error:", e)
-        return "Could not generate suggestions at this time."
+        print("❌ PDF extraction failed:", e)
+        return ""
 
+# Score resume based on JD match
+def evaluate_resume(resume_text, jd_text=None):
+    resume_words = set(re.findall(r"\w+", resume_text.lower()))
+    if jd_text:
+        jd_words = set(re.findall(r"\w+", jd_text.lower()))
+        matched = resume_words & jd_words
+        similarity = round((len(matched) / len(jd_words)) * 100, 2) if jd_words else 0
+        score = min(10, max(1, int(similarity // 10)))
+        suggestions = [word for word in jd_words if word not in resume_words]
+        return score, similarity, suggestions[:5]
+    else:
+        score = min(10, max(1, len(resume_words) // 100))
+        return score, None, ["Add more keywords from job descriptions."]
+
+# Route for file upload and evaluation
 @app.post("/upload/")
-async def upload_resume(
-    resume: UploadFile = File(...),
-    jd: UploadFile = File(None),
-    mode: str = Form("Candidate")
-):
-    try:
-        resume_bytes = await resume.read()
-        resume_text = extract_text_from_pdf(resume_bytes)
-        score = score_resume(resume_text)
+async def upload(resume: UploadFile = File(...), jd: UploadFile = File(None), mode: str = Form(...)):
+    resume_text = await extract_text_from_pdf(resume)
+    if not resume_text:
+        return {"error": "Failed to extract text from resume."}
 
-        result = {
-            "score": score,
-            "text": resume_text
-        }
+    jd_text = await extract_text_from_pdf(jd) if jd else None
+    score, similarity, suggestions = evaluate_resume(resume_text, jd_text)
 
-        if mode == "HR" and jd:
-            jd_bytes = await jd.read()
-            jd_text = extract_text_from_pdf(jd_bytes)
-            similarity = calculate_similarity(resume_text, jd_text)
-            result["similarity"] = similarity
+    return {
+        "score": score,
+        "similarity": similarity,
+        "suggestions": suggestions,
+        "text": resume_text[:1000]  # Send preview text
+    }
 
-        if mode == "Candidate":
-            result["suggestions"] = generate_openai_suggestions(resume_text)
+# Chat support route (if you keep chatbot)
+@app.post("/chat/")
+async def chat_endpoint(request: Request):
+    data = await request.json()
+    message = data.get("message", "")
+    if "resume" in message.lower():
+        return {"reply": "Use strong action verbs and tailor your resume to each job."}
+    elif "skills" in message.lower():
+        return {"reply": "Add technical + soft skills relevant to the job description."}
+    elif "jd" in message.lower() or "job description" in message.lower():
+        return {"reply": "Include role summary, key responsibilities, and required skills in your JD."}
+    else:
+        return {"reply": "Try asking about resumes, skills, or JD tips."}
 
-        return result
 
-    except Exception as e:
-        print("Error:", e)
-        return {"error": "Failed to process file."}
+
+
+
+
+
 
 
 
